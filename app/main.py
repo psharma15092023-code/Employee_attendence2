@@ -61,6 +61,7 @@ def compute_overtime(punch_out: datetime, shift_start: str, shift_end: str, date
 # --------------------------------------------------------------------------- #
 # Models
 # --------------------------------------------------------------------------- #
+
 class EmployeeIn(BaseModel):
     emp_code: str
     name: str
@@ -87,15 +88,6 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/employees", status_code=201)
-def create_employee(body: EmployeeIn):
-    if db.employees.find_one({"emp_code": body.emp_code}):
-        raise HTTPException(409, "emp_code already exists")
-    doc = body.model_dump()
-    doc["created_at"] = datetime.now()
-    db.employees.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
 
 @app.post("/employees", status_code=201)
 def create_employee(body: EmployeeIn):
