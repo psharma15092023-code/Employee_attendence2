@@ -343,6 +343,230 @@ def list_attendance(
      items.append(attendance_response(d))
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
+@app.patch("/attendance/{emp_code}/{date}")
+def correct_attendance(
+    emp_code: str,
+    date: str,
+    status: Optional[str] = None,
+):
+    
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Date must be in YYYY-MM-DD format",
+        )
+
+    
+    allowed_statuses = {"PRESENT", "ABSENT", "LEAVE"}
+
+    if status is not None and status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail="Status must be PRESENT, ABSENT, or LEAVE",
+        )
+
+    
+    record = db.attendance_logs.find_one({
+        "emp_code": emp_code,
+        "date": date,
+    })
+
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Attendance record not found",
+        )
+
+    
+    if status is not None:
+        db.attendance_logs.update_one(
+            {"_id": record["_id"]},
+            {"$set": {"status": status}},
+        )
+
+    # 5. Return the updated record
+    updated_record = db.attendance_logs.find_one(
+        {"_id": record["_id"]}
+    )
+
+    return attendance_response(updated_record)
+
+@app.get("/analytics/employees/{emp_code}/monthly")
+def monthly_employee_analytics(
+    emp_code: str,
+    year: int = Query(..., ge=2000, le=2100),
+    month: int = Query(..., ge=1, le=12),
+):
+    # Check whether the employee exists
+    employee = db.employees.find_one({"emp_code": emp_code})
+
+    if employee is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Employee not found",
+        )
+
+    # Build the date range for the selected month
+    start_date = f"{year:04d}-{month:02d}-01"
+
+    if month == 12:
+        next_month = f"{year + 1:04d}-01-01"
+    else:
+        next_month = f"{year:04d}-{month + 1:02d}-01"
+
+    # Fetch attendance records for that month
+    records = list(db.attendance_logs.find({
+        "emp_code": emp_code,
+        "date": {
+            "$gte": start_date,
+            "$lt": next_month,
+        },
+    }).sort("date", 1))
+
+    total_days = len(records)
+    present_days = sum(
+        1 for r in records if r.get("status") == "PRESENT"
+    )
+    absent_days = sum(
+        1 for r in records if r.get("status") == "ABSENT"
+    )
+    leave_days = sum(
+        1 for r in records if r.get("status") == "LEAVE"
+    )
+
+    total_work_hours = round(
+        sum(r.get("work_hours") or 0 for r in records), 2
+    )
+
+    return {
+        "emp_code": emp_code,
+        "year": year,
+        "month": month,
+        "total_recorded_days": total_days,
+        "present_days": present_days,
+        "absent_days": absent_days,
+        "leave_days": leave_days,
+        "total_work_hours": total_work_hours,
+        "average_work_hours": round(
+            total_work_hours / total_days, 2
+        ) if total_days else 0,
+    }
+
+@app.get("/analytics/departments/summary")
+def department_summary():
+    pipeline = [
+        {
+            "$group": {
+                "_id": "$emp_code",
+                "department": {"$first": None},
+                "total_days": {"$sum": 1},
+                "present_days": {
+                    "$sum": {
+                        "$cond": [
+                            {"$eq": ["$status", "PRESENT"]},
+                            1,
+                            0,
+                        ]
+                    }
+                },
+                "total_work_hours": {
+                    "$sum": {"$ifNull": ["$work_hours", 0]}
+                },
+            }
+        },
+        {
+            "$lookup": {
+                "from": "employees",
+                "localField": "_id",
+                "foreignField": "emp_code",
+                "as": "employee",
+            }
+        },
+        {"$unwind": "$employee"},
+        {
+            "$group": {
+                "_id": "$employee.department",
+                "employee_count": {"$sum": 1},
+                "total_recorded_days": {"$sum": "$total_days"},
+                "present_days": {"$sum": "$present_days"},
+                "total_work_hours": {"$sum": "$total_work_hours"},
+            }
+        },
+        {"$sort": {"_id": 1}},
+    ]
+
+    results = list(db.attendance_logs.aggregate(pipeline))
+
+    return {
+        "departments": [
+            {
+                "department": item["_id"],
+                "employee_count": item["employee_count"],
+                "total_recorded_days": item["total_recorded_days"],
+                "present_days": item["present_days"],
+                "total_work_hours": round(item["total_work_hours"], 2),
+            }
+            for item in results
+        ]
+    }
+
+@app.get("/analytics/leaderboard/late")
+def late_arrival_leaderboard(
+    limit: int = Query(10, ge=1, le=100),
+):
+    pipeline = [
+        {
+            "$group": {
+                "_id": "$emp_code",
+                "late_days": {
+                    "$sum": {
+                        "$cond": [
+                            {"$gt": ["$late_minutes", 0]},
+                            1,
+                            0,
+                        ]
+                    }
+                },
+                "total_late_minutes": {
+                    "$sum": {"$ifNull": ["$late_minutes", 0]}
+                },
+            }
+        },
+        {"$match": {"late_days": {"$gt": 0}}},
+        {
+            "$lookup": {
+                "from": "employees",
+                "localField": "_id",
+                "foreignField": "emp_code",
+                "as": "employee",
+            }
+        },
+        {"$unwind": "$employee"},
+        {
+            "$project": {
+                "_id": 0,
+                "emp_code": "$_id",
+                "name": "$employee.name",
+                "department": "$employee.department",
+                "late_days": 1,
+                "total_late_minutes": 1,
+            }
+        },
+        {
+            "$sort": {
+                "total_late_minutes": -1,
+                "emp_code": 1,
+            }
+        },
+        {"$limit": limit},
+    ]
+
+    results = list(db.attendance_logs.aggregate(pipeline))
+
+    return {"leaderboard": results}
+
 
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
