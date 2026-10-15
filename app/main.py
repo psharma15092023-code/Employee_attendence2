@@ -26,13 +26,8 @@ db = client[os.getenv("MONGO_DB", "attendance_db")]
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    db.employees.create_index("emp_code", unique=True)
-    db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
-    yield
 
-app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
 
 
 # --------------------------------------------------------------------------- #
@@ -80,7 +75,9 @@ class PunchInIn(BaseModel):
     emp_code: str
     punched_at: Optional[int] = None
     status: str = "PRESENT"
-
+class PunchOutIn(BaseModel):
+    emp_code: str
+    punched_at: Optional[int] = None
 
 # --------------------------------------------------------------------------- #
 # Endpoints provided
@@ -149,7 +146,53 @@ def punch_in(body: PunchInIn):
     doc.pop("_id", None)
     return doc
 
+HALF_DAY_HOURS = 4.0   # TODO: set from the spec
 
+@app.post("/attendance/punch-out")
+def punch_out(body: PunchOutIn):
+    emp = db.employees.find_one({"emp_code": body.emp_code})
+    if emp is None:
+        raise HTTPException(404, "employee not found")
+
+    if body.punched_at is not None:
+        ts = datetime.fromtimestamp(body.punched_at / 1000, tz=IST)
+    else:
+        ts = datetime.now(IST)
+
+    rec = db.attendance_logs.find_one(
+        {"emp_code": body.emp_code, "punch_out": None},
+        sort=[("date", -1)],
+    )
+    if rec is None:
+        raise HTTPException(409, "no open punch-in for this employee")
+
+    punch_in_ts = rec["punch_in"]
+    if punch_in_ts.tzinfo is None:                 # safety net
+        punch_in_ts = punch_in_ts.replace(tzinfo=timezone.utc)
+
+    if ts <= punch_in_ts:
+        raise HTTPException(422, "punch_out must be after punch_in")
+    if ts - punch_in_ts > timedelta(hours=24):
+        raise HTTPException(422, "punch_out is more than 24 hours after punch_in")
+
+    work_hours = compute_work_hours(punch_in_ts, ts)
+    overtime = compute_overtime(ts, emp["shift_start"], emp["shift_end"], rec["date"])
+
+    res = db.attendance_logs.update_one(
+        {"_id": rec["_id"], "punch_out": None},     # guard against a double punch-out race
+        {"$set": {
+            "punch_out": ts,
+            "work_hours": work_hours,
+            "overtime_minutes": overtime,
+            "half_day": work_hours < HALF_DAY_HOURS,
+        }},
+    )
+    if res.modified_count == 0:
+        raise HTTPException(409, "already punched out")
+
+    rec = db.attendance_logs.find_one({"_id": rec["_id"]})
+    rec["id"] = str(rec.pop("_id"))
+    return rec
 @app.get("/attendance")
 def list_attendance(
     emp_code: Optional[str] = None,
