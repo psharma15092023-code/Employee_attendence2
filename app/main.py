@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from pymongo.errors import DuplicateKeyError
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 from pymongo import MongoClient
 
 load_dotenv()
@@ -73,12 +73,12 @@ class EmployeeIn(BaseModel):
 
 class PunchInIn(BaseModel):
     emp_code: str
-    punched_at: Optional[int] = None
+    punched_at: Optional[StrictInt] = None
     status: str = "PRESENT"
+
 class PunchOutIn(BaseModel):
     emp_code: str
-    punched_at: Optional[int] = None
-
+    punched_at: Optional[StrictInt] = None
 # --------------------------------------------------------------------------- #
 # Endpoints provided
 # --------------------------------------------------------------------------- #
@@ -97,21 +97,16 @@ def create_employee(body: EmployeeIn):
     doc.pop("_id", None)
     return doc
 
-
-@app.get("/employees")
-def list_employees( department: Optional[str] = None, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),):
-    q = {}
-    if department:
-        q["department"] = department
-    skip = (page - 1) * page_size
-    total = db.employees.count_documents(q)
-    items = list(
-        db.employees.find(q, {"_id": 0})
-        .sort("emp_code", 1)
-        .skip(skip)
-        .limit(page_size)
-    )
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+@app.post("/employees", status_code=201)
+def create_employee(body: EmployeeIn):
+    doc = body.model_dump()
+    doc["created_at"] = datetime.now(timezone.utc)
+    try:
+        db.employees.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, "emp_code already exists")
+    doc.pop("_id", None)
+    return doc
 
 
 @app.post("/attendance/punch-in", status_code=201)
