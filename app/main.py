@@ -13,14 +13,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
+from pymongo.errors import DuplicateKeyError
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from pymongo import MongoClient
 
 load_dotenv()
-
-client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
+client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"), tz_aware=True)
 db = client[os.getenv("MONGO_DB", "attendance_db")]
 
 IST = timezone(timedelta(hours=5, minutes=30))
