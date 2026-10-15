@@ -26,7 +26,13 @@ db = client[os.getenv("MONGO_DB", "attendance_db")]
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.employees.create_index("emp_code", unique=True)
+    db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
+    yield
+
+app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------- #
@@ -114,10 +120,15 @@ def list_employees( department: Optional[str] = None, page: int = Query(1, ge=1)
 @app.post("/attendance/punch-in", status_code=201)
 def punch_in(body: PunchInIn):
     emp = db.employees.find_one({"emp_code": body.emp_code})
-    ts = datetime.fromtimestamp(body.punched_at / 1000) if body.punched_at else datetime.now()
+    if emp is None:
+        raise HTTPException(404, "employee not found")
+
+    if body.punched_at is not None:
+        ts = datetime.fromtimestamp(body.punched_at / 1000, tz=IST)
+    else:
+        ts = datetime.now(IST)
     d = ts.date().isoformat()
-    if db.attendance_logs.find_one({"emp_code": body.emp_code, "date": d}):
-        raise HTTPException(409, "already punched in for this date")
+
     doc = {
         "emp_code": body.emp_code,
         "date": d,
@@ -130,7 +141,10 @@ def punch_in(body: PunchInIn):
         "half_day": False,
         "history": [],
     }
-    res = db.attendance_logs.insert_one(doc)
+    try:
+        res = db.attendance_logs.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, "already punched in for this date")
     doc["id"] = str(res.inserted_id)
     doc.pop("_id", None)
     return doc
