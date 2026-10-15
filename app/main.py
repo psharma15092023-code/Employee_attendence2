@@ -31,20 +31,28 @@ app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
 # Helpers
 # --------------------------------------------------------------------------- #
 def compute_late_minutes(punch_in: datetime, shift_start: str) -> int:
+    punch_in = punch_in.astimezone(IST)
     h, m = map(int, shift_start.split(":"))
-    start = punch_in.replace(hour=h, minute=m, second=0, microsecond=0)
-    minutes = int((punch_in - start).total_seconds() / 60)
+    candidates = [
+        punch_in.replace(hour=h, minute=m, second=0, microsecond=0) + timedelta(days=d)
+        for d in (-1, 0)
+    ]
+    start = min(candidates, key=lambda s: abs(punch_in - s))
+    minutes = int((punch_in - start).total_seconds() // 60)
     return minutes if minutes > 10 else 0
-
 
 def compute_work_hours(punch_in: datetime, punch_out: datetime) -> float:
     return round((punch_out - punch_in).total_seconds() / 3600, 2)
 
 
-def compute_overtime(punch_out: datetime, shift_end: str, date_str: str) -> int:
-    h, m = map(int, shift_end.split(":"))
-    end = datetime.fromisoformat(date_str).replace(hour=h, minute=m, tzinfo=IST)
-    return max(0, int((punch_out - end).total_seconds() / 60))
+def compute_overtime(punch_out: datetime, shift_start: str, shift_end: str, date_str: str) -> int:
+    sh, sm= map(int, shift_start.split(":"))
+    eh, em=map(int, shift_end.split(":"))
+    end = datetime.fromisoformat(date_str).replace(hour=eh, minute=em, tzinfo=IST)
+    if(eh,em)<= (sh,sm):
+        end+=timedelta(days=1)
+    punch_out=punch_out.astimezone(IST)    
+    return max(0, int((punch_out - end).total_seconds() // 60))
 
 
 # --------------------------------------------------------------------------- #
